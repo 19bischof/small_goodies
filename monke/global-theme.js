@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        Global Reader Theme
 // @namespace   Violentmonkey Scripts
-// @version     3.2.0
+// @version     3.5.0
 //
 // @match       *://*/*
 // @grant       none
@@ -23,6 +23,11 @@
         bgHue: 35,
         bgLightness: 92,
         textLightness: 15
+    };
+
+    const DEFAULT_BG_IMAGE = {
+        url: "",
+        pageOpacity: 100
     };
 
     const PRESETS = {
@@ -56,6 +61,7 @@
         return {
             configured: false,
             colors: { ...DEFAULT_COLORS },
+            bgImage: { ...DEFAULT_BG_IMAGE },
             selectors: {
                 page: ["html", "body"],
                 panel: [],
@@ -80,6 +86,10 @@
                         ...(preset?.colors || {}),
                         ...(saved.colors || {})
                     },
+                    bgImage: {
+                        ...DEFAULT_BG_IMAGE,
+                        ...(saved.bgImage || {})
+                    },
                     selectors: {
                         ...emptyConfig().selectors,
                         ...(preset?.selectors || {}),
@@ -96,6 +106,7 @@
                 ...emptyConfig(),
                 ...preset,
                 colors: { ...DEFAULT_COLORS, ...preset.colors },
+                bgImage: { ...DEFAULT_BG_IMAGE },
                 selectors: { ...emptyConfig().selectors, ...preset.selectors }
             };
         }
@@ -108,6 +119,7 @@
         const payload = {
             configured: config.configured,
             colors: config.colors,
+            bgImage: config.bgImage,
             selectors: config.selectors
         };
         localStorage.setItem(storageKey, JSON.stringify(payload));
@@ -217,6 +229,45 @@
             muted: hsl(bgHue, 15, clamp(textLightness + 25, 0, 100)),
             accent: hsl(bgHue, 60, 45)
         };
+    }
+
+
+    function cssUrl(url) {
+        return String(url).replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+    }
+
+    function hasBackgroundImage() {
+        return Boolean(config.bgImage?.url);
+    }
+
+    function pageColorAlpha(alpha) {
+        const { bgHue, bgLightness } = config.colors;
+        return `hsla(${bgHue}, 35%, ${bgLightness}%, ${alpha})`;
+    }
+
+    function findPrimaryPageSelector(pageList) {
+        const selectors = (pageList || []).map(resolveSelector).filter(Boolean);
+        if (!selectors.length) return null;
+
+        let bestSelector = selectors[0];
+        let bestArea = 0;
+
+        for (const selector of selectors) {
+            try {
+                for (const el of document.querySelectorAll(selector)) {
+                    const rect = el.getBoundingClientRect();
+                    const area = rect.width * rect.height;
+                    if (area > bestArea) {
+                        bestArea = area;
+                        bestSelector = selector;
+                    }
+                }
+            } catch {
+                // ignore invalid selectors
+            }
+        }
+
+        return bestSelector;
     }
 
     function escapeCss(value) {
@@ -356,10 +407,37 @@
         const t = getTheme();
         const { page, panel, text, hide } = config.selectors;
         const rules = [];
+        const bgImage = { ...DEFAULT_BG_IMAGE, ...(config.bgImage || {}) };
+        const pageOpacity = clamp(
+            bgImage.pageOpacity ?? bgImage.imageOpacity ?? 100,
+            0,
+            100
+        ) / 100;
+        const pageColor = pageColorAlpha(pageOpacity);
+        const pageTargets = (page || []).map(resolveSelector).filter(Boolean);
+        const primaryPage = findPrimaryPageSelector(page) || pageTargets[0];
+        const otherPages = pageTargets.filter(sel => sel !== primaryPage);
 
-        const pageSel = joinSelectors(page);
-        if (pageSel) {
-            rules.push(`${pageSel} { background:${t.page} !important; }`);
+        if (otherPages.length) {
+            rules.push(
+                `${otherPages.join(", ")} { background-color:${pageColor} !important; }`
+            );
+        }
+
+        if (primaryPage) {
+            if (bgImage.url) {
+                rules.push(`${primaryPage} {
+                    background-image:linear-gradient(${pageColor}, ${pageColor}), url("${cssUrl(bgImage.url)}") !important;
+                    background-size:cover, cover !important;
+                    background-position:center, center !important;
+                    background-repeat:no-repeat, no-repeat !important;
+                    background-attachment:fixed, fixed !important;
+                }`);
+            } else {
+                rules.push(
+                    `${primaryPage} { background-color:${pageColor} !important; }`
+                );
+            }
         }
 
         const panelSel = joinSelectors(panel);
@@ -397,8 +475,12 @@
     style.id = "global-reader-theme-style";
     document.documentElement.appendChild(style);
 
-    function applyTheme() {
+    function updateStyles() {
         style.textContent = buildCss();
+    }
+
+    function applyTheme() {
+        updateStyles();
         saveConfig();
         refreshUi();
     }
@@ -412,7 +494,7 @@
             focusToggle.textContent = enabled ? "Zen Mode: On" : "Zen Mode: Off";
             focusToggle.style.background = enabled ? "#16a34a" : "#111827";
         }
-        style.textContent = buildCss();
+        updateStyles();
     }
 
     function isOurElement(el) {
@@ -589,6 +671,19 @@
         bgHueValue.textContent = config.colors.bgHue;
         bgLightValue.textContent = config.colors.bgLightness;
         textLightValue.textContent = config.colors.textLightness;
+
+        if (bgImageUrl && document.activeElement !== bgImageUrl) {
+            bgImageUrl.value = config.bgImage?.url || "";
+        }
+        const pageOpacityUi =
+            config.bgImage?.pageOpacity ?? config.bgImage?.imageOpacity ?? 100;
+        if (bgImageOpacity) bgImageOpacity.value = pageOpacityUi;
+        if (bgImageOpacityValue) {
+            bgImageOpacityValue.textContent = pageOpacityUi;
+        }
+        if (bgImageClear) {
+            bgImageClear.style.display = hasBackgroundImage() ? "block" : "none";
+        }
     }
 
     const container = document.createElement("div");
@@ -672,6 +767,35 @@
                 </div>
                 <input id="grt-textLight" type="range" min="0" max="100" style="width:100%;">
             </div>
+
+            <div style="margin-top:8px;padding-top:14px;border-top:1px solid #e5e7eb;">
+                <div style="font-size:13px;font-weight:700;margin-bottom:8px;">Background image</div>
+                <div style="font-size:11px;color:#6b7280;margin-bottom:8px;line-height:1.4;">
+                    Image applies to the largest page background area. Opacity controls the background color only.
+                </div>
+                <input
+                    id="grt-bgImageUrl"
+                    type="text"
+                    placeholder="Image URL"
+                    style="width:100%;box-sizing:border-box;border:1px solid #d1d5db;border-radius:8px;padding:8px;font-size:12px;margin-bottom:8px;"
+                >
+                <label style="display:block;font-size:12px;margin-bottom:8px;cursor:pointer;">
+                    <span style="display:inline-block;border:none;border-radius:8px;padding:8px 12px;background:#e5e7eb;font-weight:600;">Upload image</span>
+                    <input id="grt-bgImageFile" type="file" accept="image/*" style="display:none;">
+                </label>
+                <button type="button" id="grt-bgImageClear" style="display:none;width:100%;border:none;border-radius:8px;padding:8px;cursor:pointer;background:#fecaca;color:#991b1b;font-weight:600;margin-bottom:12px;">
+                    Remove image
+                </button>
+
+                <div style="margin-bottom:12px;">
+                    <div style="display:flex;justify-content:space-between;margin-bottom:4px;font-size:12px;">
+                        <span>Background opacity</span>
+                        <span id="grt-bgImageOpacityValue">100</span>
+                    </div>
+                    <input id="grt-bgImageOpacity" type="range" min="0" max="100" style="width:100%;">
+                </div>
+
+            </div>
         </div>
 
         <div id="grt-mapping" style="display:none;margin-top:8px;padding-top:12px;border-top:1px solid #e5e7eb;">
@@ -700,6 +824,11 @@
     const bgHueValue = panel.querySelector("#grt-bgHueValue");
     const bgLightValue = panel.querySelector("#grt-bgLightValue");
     const textLightValue = panel.querySelector("#grt-textLightValue");
+    const bgImageUrl = panel.querySelector("#grt-bgImageUrl");
+    const bgImageFile = panel.querySelector("#grt-bgImageFile");
+    const bgImageClear = panel.querySelector("#grt-bgImageClear");
+    const bgImageOpacity = panel.querySelector("#grt-bgImageOpacity");
+    const bgImageOpacityValue = panel.querySelector("#grt-bgImageOpacityValue");
 
     panel.querySelector("#grt-host").textContent = host;
 
@@ -776,6 +905,59 @@
         applyTheme();
     });
 
+    if (!config.bgImage) config.bgImage = { ...DEFAULT_BG_IMAGE };
+
+    let bgImageUrlTimer = null;
+
+    function commitBgImageUrl() {
+        config.bgImage.url = bgImageUrl.value.trim();
+        updateStyles();
+        saveConfig();
+        if (bgImageClear) {
+            bgImageClear.style.display = hasBackgroundImage() ? "block" : "none";
+        }
+    }
+
+    bgImageUrl.addEventListener("input", () => {
+        clearTimeout(bgImageUrlTimer);
+        bgImageUrlTimer = setTimeout(commitBgImageUrl, 400);
+    });
+
+    bgImageUrl.addEventListener("change", commitBgImageUrl);
+
+    bgImageUrl.addEventListener("keydown", e => {
+        e.stopPropagation();
+        if (e.key === "Enter") {
+            e.preventDefault();
+            clearTimeout(bgImageUrlTimer);
+            commitBgImageUrl();
+        }
+    });
+
+    bgImageFile.addEventListener("change", () => {
+        const file = bgImageFile.files?.[0];
+        if (!file) return;
+
+        const reader = new FileReader();
+        reader.onload = () => {
+            config.bgImage.url = reader.result;
+            applyTheme();
+        };
+        reader.readAsDataURL(file);
+        bgImageFile.value = "";
+    });
+
+    bgImageClear.addEventListener("click", e => {
+        e.stopPropagation();
+        config.bgImage.url = "";
+        applyTheme();
+    });
+
+    bgImageOpacity.addEventListener("input", () => {
+        config.bgImage.pageOpacity = Number(bgImageOpacity.value);
+        applyTheme();
+    });
+
     focusToggle.addEventListener("click", e => {
         e.stopPropagation();
         setFocusMode(!document.body.classList.contains(FOCUS_CLASS));
@@ -831,7 +1013,7 @@
     let observerTimer = null;
     const observer = new MutationObserver(() => {
         clearTimeout(observerTimer);
-        observerTimer = setTimeout(applyTheme, 300);
+        observerTimer = setTimeout(updateStyles, 300);
     });
 
     if (document.body) {
